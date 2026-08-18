@@ -5,10 +5,10 @@ import torch.nn.functional as F
 
 class CausalSelfAttention(nn.Module):
     """
-    Current attention implementation.
+    Current attention implementation : vanilla 
 
     Later this module can contain:
-      - FlashAttention 1/2/3/4
+      - FlashAttention 1/2/3
       - Linear Attention
       - MLA
       - other attention variants
