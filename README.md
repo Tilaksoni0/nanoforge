@@ -48,3 +48,6 @@ Do not split code into files merely to maximize the number of files.
 - No attempt is made here to reproduce a production-scale framework.
 
 The repository should grow as the implementation grows.
+
+- testing my git workflow
+
