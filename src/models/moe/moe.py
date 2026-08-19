@@ -9,12 +9,10 @@ class MoE(nn.Module):
     """
     Current top-k sparse MoE implementation.
 
-    Future separate variants can live beside this:
-        shazeer.py
-        switch.py
-        qwen.py
-        mixtral.py
-        deepseek.py
+    using a slice and cut forward instead of passing evert token to every expert 
+    (ie. expert_out_list = [
+            expert(x).unsqueeze(1) for expert in self.experts
+        ] is wasteful
     """
 
     def __init__(self, config):
