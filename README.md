@@ -186,6 +186,7 @@ https://arxiv.org/abs/1711.05101
 ```text
 NanoForge/
 ├── src/
+│   ├── __init__.py
 │   ├── config/
 │   ├── data/
 │   ├── distributed/
@@ -193,15 +194,35 @@ NanoForge/
 │   ├── experiments/
 │   ├── kernels/
 │   ├── models/
+│   │   ├── __init__.py
 │   │   ├── attention/
+│   │   │   ├── __init__.py
+│   │   │   └── vanilla.py
 │   │   ├── moe/
+│   │   │   ├── __init__.py
+│   │   │   ├── router.py
+│   │   │   ├── dispatch.py
+│   │   │   ├── experts.py
+│   │   │   ├── moe.py
+│   │   │   ├── losses.py
+│   │   │   └── legacy.py
 │   │   └── norms/
+│   │       ├── __init__.py
+│   │       └── norms.py
 │   └── training/
+│       ├── __init__.py
+│       └── train.py
 │
 ├── unified/
+│   ├── README.md
 │   └── gpt_moe_unified.py
 │
+├── benchmarks/
+│   ├── benchmark_dispatch.py
+│   └── check_dispatch_equivalence.py
+│
 └── README.md
+
 ```
 
 `src/` contains the modular implementation.
