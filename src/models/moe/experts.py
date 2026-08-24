@@ -17,25 +17,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class Expert(nn.Module):
     """Single FFN expert: up-projection -> GELU -> down-projection.
 
-    bias=False on both linears to match StackedExperts (Mixtral-style,
-    no bias). Keeping both representations bias-free keeps dispatch
-    strategies numerically comparable, see
-    benchmarks/check_dispatch_equivalence.py.
+      swiglu=True: f_u packs gate and up projections together
+        (2 * hidden_dim), one matmul produces both halves via
+        .chunk(2, dim=-1). forward computes GELU(gate) * up @ down.
+      
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, swiglu: bool = True) -> None:
         super().__init__()
+        self.swiglu = swiglu
+        up_dim = 2 * hidden_dim if swiglu else hidden_dim
         self.gelu = nn.GELU(approximate="tanh")
-        self.f_u = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.f_u = nn.Linear(input_dim, up_dim, bias=False)
         self.f_d = nn.Linear(hidden_dim, output_dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.f_d(self.gelu(self.f_u(x)))
-
+        if self.swiglu:
+            gate, up = self.f_u(x).chunk(2, dim=-1)
+            hidden = self.gelu(gate) * up
+        else:
+            hidden = self.gelu(self.f_u(x))
+        return self.f_d(hidden)
 
 class ModuleListExperts(nn.Module):
     """A list of independent Expert modules, indexed by expert id."""
