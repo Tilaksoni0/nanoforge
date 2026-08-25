@@ -1,43 +1,13 @@
 """
-Dispatch: token grouping/permutation and the actual expert computation.
+dispatch.py — token routing strategies for MoE layers.
 
-Three interchangeable strategies are implemented here, all satisfying the
-same interface -- (x, routing_result, experts) -> output of shape (T, C).
-Swap them by passing a different `dispatch_fn` into MOE's config; nothing
-else in the model needs to change.
+Four strategies: dense_all_experts (reference/oracle), dense_masked
+(Mixtral-style), sort_and_slice (fastest, used with global-LBL), and
+sort_and_pad (capacity-bounded batched matmul, may drop tokens).
 
-  dense_all_experts   -- every expert processes every token, weighted sum.
-                          O(num_experts) matmuls of full (T, C) each. This
-                          is the naive reference (BasicMOE-style): correct,
-                          simple, deliberately wasteful. Kept for
-                          pedagogical/progression purposes and as a
-                          correctness oracle to test the other two against.
-
-  dense_masked        -- one_hot mask per expert, loop only over experts
-                          that were actually selected by >=1 token, gather
-                          those tokens by boolean/where mask, index_add
-                          back. This mirrors Mixtral's MixtralExperts
-                          dispatch. Still python-loops over experts, but
-                          skips experts nobody picked and avoids computing
-                          on tokens that didn't select that expert.
-
-  sort_and_slice      -- argsort all (token, expert) pairs by expert id,
-                          so every expert's tokens become one contiguous
-                          slice; bincount gives slice boundaries directly,
-                          no masking needed at all. This is the
-                          fastest of the three in practice because it
-                          replaces per-expert boolean masking/gathering
-                          with a single global sort plus contiguous slicing,
-                          and each expert's matmul operates on a tightly
-                          packed contiguous tensor (better memory locality,
-                          fewer wasted lanes than the masked version).
-                          This is the dispatch used by the global-LBL
-                          ("fastest") MoE variant.
-
-All three are correctness-equivalent (same math, same gradient), so a unit
-test asserting they produce matching outputs on the same input is the right
-way to validate that a change to one hasn't broken it -- see
-benchmarks/check_dispatch_equivalence.py.
+All four share the signature (x, routing, experts, top_k) -> (T, C),
+except sort_and_pad which requires an extra `capacity` argument.
+See DISPATCH_REGISTRY at the bottom to swap strategies by name.
 """
 
 import torch
@@ -156,9 +126,65 @@ def sort_and_slice(
 
     return final_output
 
+def sort_and_pad(
+    x: torch.Tensor,
+    routing: RoutingResult,
+    experts: StackedExperts,
+    top_k: int,
+    capacity: int,
+) -> torch.Tensor:
+    """Sort + fixed capacity buffer, single batched matmul across all experts.
+
+    Same sort step as sort_and_slice, but each expert's slice is padded or
+    truncated to `capacity` tokens, enabling one bmm over the full
+    (num_experts, capacity, C) buffer instead of a Python loop.
+    Tokens beyond capacity for their expert are silently dropped.
+    Only numerically equivalent to the other strategies when capacity is large
+    enough that no token is dropped for the given input.
+    """
+    T, C = x.shape
+    N = T * top_k
+    num_experts = len(experts)
+    assert capacity > 0, "capacity must be positive"
+    assert routing.indices.shape == (T, top_k), routing.indices.shape
+
+    flattened_indices = torch.flatten(routing.indices)
+    flattened_values = torch.flatten(routing.values)
+    token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
+
+    exp_order = torch.argsort(flattened_indices)
+    sorted_experts = flattened_indices[exp_order]
+    sorted_token_ids = token_ids[exp_order]
+    sorted_values = flattened_values[exp_order]
+
+    group_sizes = torch.bincount(sorted_experts, minlength=num_experts)
+    group_starts = torch.cumsum(group_sizes, dim=0) - group_sizes
+    local_rank = torch.arange(N, device=x.device) - torch.repeat_interleave(group_starts, group_sizes)
+
+    keep_mask = local_rank < capacity
+    kept_dest = sorted_experts[keep_mask] * capacity + local_rank[keep_mask]
+    kept_token_ids = sorted_token_ids[keep_mask]
+
+    padded = torch.zeros(num_experts * capacity, C, device=x.device, dtype=x.dtype)
+    padded[kept_dest] = x[kept_token_ids]
+
+    hidden = experts.forward_batched(padded.view(num_experts, capacity, C))
+    out_flat = hidden.reshape(num_experts * capacity, -1)
+
+    weighted = out_flat[kept_dest] * sorted_values[keep_mask].unsqueeze(-1)
+
+    final_output = torch.zeros(T, C, device=x.device, dtype=x.dtype)
+    final_output.scatter_add_(
+        0, kept_token_ids.unsqueeze(-1).expand(-1, C), weighted.to(final_output.dtype)
+    )
+    return final_output
+
+
+
 
 DISPATCH_REGISTRY = {
     "dense_all_experts": dense_all_experts,
     "dense_masked": dense_masked,
     "sort_and_slice": sort_and_slice,
+    "sort_and_pad":      sort_and_pad,
 }
