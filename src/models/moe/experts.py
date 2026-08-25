@@ -113,3 +113,18 @@ class StackedExperts(nn.Module):
         else:
             hidden = self.gelu(F.linear(x, self.gate_up_proj[expert_idx]))
         return F.linear(hidden, self.down_proj[expert_idx])
+    def forward_batched(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply all experts at once via a single batched matmul.
+
+        x: (num_experts, capacity, input_dim), each slice already routed
+        to its corresponding expert (e.g. by sort_and_pad). Used by dispatch
+        strategies that batch across the expert dimension instead of
+        looping python-side -- see forward_one_expert for the per-expert
+        equivalent.
+        """
+        if self.swiglu:
+            gate, up = torch.bmm(x, self.gate_up_proj.transpose(1, 2)).chunk(2, dim=-1)
+            hidden = self.gelu(gate) * up
+        else:
+            hidden = self.gelu(torch.bmm(x, self.gate_up_proj.transpose(1, 2)))
+        return torch.bmm(hidden, self.down_proj.transpose(1, 2))
