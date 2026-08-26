@@ -131,7 +131,7 @@ def sort_and_pad(
     routing: RoutingResult,
     experts: StackedExperts,
     top_k: int,
-    capacity: int,
+    capacity_factor: float = 1.25, # fix: instead passing capcity pass capacity factor
 ) -> torch.Tensor:
     """Sort + fixed capacity buffer, single batched matmul across all experts.
 
@@ -141,12 +141,20 @@ def sort_and_pad(
     Tokens beyond capacity for their expert are silently dropped.
     Only numerically equivalent to the other strategies when capacity is large
     enough that no token is dropped for the given input.
+
+    capacity = round((T * top_k / num_experts) * capacity_factor), same
+    idea as Switch Transformer: one shared value for every expert, not
+    measured from this batch's actual load. Tokens past capacity for
+    their expert get dropped. Want dropless? see sort_pad_bucket
+    (bucketed capacity) or sort_and_slice (no padding at all).
     """
     T, C = x.shape
     N = T * top_k
     num_experts = len(experts)
-    assert capacity > 0, "capacity must be positive"
+    assert capacity_factor > 0, "capacity_factor must be positive" # changed from capcity to capcity_factor
     assert routing.indices.shape == (T, top_k), routing.indices.shape
+
+    capacity = round((N / num_experts) * capacity_factor) # calculate capacity
 
     flattened_indices = torch.flatten(routing.indices)
     flattened_values = torch.flatten(routing.values)
@@ -179,7 +187,76 @@ def sort_and_pad(
     )
     return final_output
 
+def sort_pad_bucket(
+    x: torch.Tensor,
+    routing: RoutingResult,
+    experts: StackedExperts,
+    top_k: int,
+    BUCKET: list = None,  
+) -> torch.Tensor:
+    """This func works mostly similar but with a slight optimisation, aimed to be dropless.
 
+    Optimisation: sort_and_pad above is not aware of what capacity its
+    receiving. It may be greater then the max group_size, which leads
+    to a wasteful amount of padding, or it can be smaller then some of
+    the group sizes, which leads to dropping tokens, which is not a
+    desired thing. So instead of passing a hard capacity choice, we let
+    the batch choose (we could have done max(group_size) every time, but
+    this would have a lot of different shapes every time which are bad
+    for hardware efficiency, so instead there is a fixed number of sizes
+    we can pick from, this saves the caches and pytorch need not to
+    recompile every time).
+
+    MoEConfig defines a default BUCKET list, and it is optional, one can
+    pass his own. If the batch's max group_size ends up bigger then every
+    bucket in the list, this will raise, so the largest bucket should
+    always cover the biggest batch this is ever run on.
+    """
+    
+    if BUCKET is None:
+        BUCKET = MoEConfig.BUCKET
+
+    T, C = x.shape
+    N = T * top_k
+    num_experts = len(experts)
+    assert len(BUCKET) > 0, "BUCKET must be non-empty" 
+    assert routing.indices.shape == (T, top_k), routing.indices.shape
+
+    flattened_indices = torch.flatten(routing.indices)
+    flattened_values = torch.flatten(routing.values)
+    token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
+
+    exp_order = torch.argsort(flattened_indices)
+    sorted_experts = flattened_indices[exp_order]
+    sorted_token_ids = token_ids[exp_order]
+    sorted_values = flattened_values[exp_order]
+
+    group_sizes = torch.bincount(sorted_experts, minlength=num_experts)
+    max_group_size = torch.max(group_sizes).item()
+    # NOTE The largest value of capcity must be >= T(Total_tokens) as if the worst case happens and we have the max(bucket) < the worst casr 
+    # the next would stop iteration
+    capacity = next(b for b in BUCKET if max_group_size <= b)
+    group_starts = torch.cumsum(group_sizes, dim=0) - group_sizes
+
+    local_rank = torch.arange(N, device=x.device) - torch.repeat_interleave(group_starts, group_sizes)
+
+    keep_mask = local_rank < capacity
+    kept_dest = sorted_experts[keep_mask] * capacity + local_rank[keep_mask]
+    kept_token_ids = sorted_token_ids[keep_mask]
+
+    padded = torch.zeros(num_experts * capacity, C, device=x.device, dtype=x.dtype)
+    padded[kept_dest] = x[kept_token_ids]
+
+    hidden = experts.forward_batched(padded.view(num_experts, capacity, C))
+    out_flat = hidden.reshape(num_experts * capacity, -1)
+
+    weighted = out_flat[kept_dest] * sorted_values[keep_mask].unsqueeze(-1)
+
+    final_output = torch.zeros(T, C, device=x.device, dtype=x.dtype)
+    final_output.scatter_add_(
+        0, kept_token_ids.unsqueeze(-1).expand(-1, C), weighted.to(final_output.dtype)
+    )
+    return final_output
 
 
 DISPATCH_REGISTRY = {
@@ -187,4 +264,5 @@ DISPATCH_REGISTRY = {
     "dense_masked": dense_masked,
     "sort_and_slice": sort_and_slice,
     "sort_and_pad":      sort_and_pad,
+    "sort_pad_bucket": sort_pad_bucket,
 }
