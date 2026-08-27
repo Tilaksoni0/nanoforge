@@ -1,12 +1,21 @@
-from .moe import MoE
-from .experts import Expert
-from .router import GatingNetwork
-from .losses import return_stats, global_lbl
+from .moe import MOE, MOEConfig, MoE
+from .experts import Expert, ModuleListExperts, StackedExperts
+from .router import GatingNetwork, RoutingResult, route, extract_stats
+from .losses import GlobalLoadBalancingLoss, load_balancing_loss
+from .dispatch import DISPATCH_REGISTRY
 
 __all__ = [
-    "MoE",
+    "MOE",
+    "MOEConfig",
+    "MoE",  # backwards-compat alias for MOE
     "Expert",
+    "ModuleListExperts",
+    "StackedExperts",
     "GatingNetwork",
-    "return_stats",
-    "global_lbl",
+    "RoutingResult",
+    "route",
+    "extract_stats",
+    "GlobalLoadBalancingLoss",
+    "load_balancing_loss",
+    "DISPATCH_REGISTRY",
 ]

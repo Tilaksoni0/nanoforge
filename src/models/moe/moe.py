@@ -1,143 +1,114 @@
 """
-Dispatch strategies for MoE token routing and expert computation.
+MoE: the nn.Module that wires router.py + experts.py + dispatch.py together.
 
-All strategies share (x, routing, experts) -> output (T, C):
+This file does NOT implement dispatch strategies itself -- those live in
+dispatch.py's DISPATCH_REGISTRY. This file owns:
+  - MOEConfig: the config dataclass gpt.py builds and passes in.
+  - MOE: holds the gating network, both expert-container layouts
+    (ModuleListExperts / StackedExperts), and picks whichever container
+    the selected dispatch strategy needs, then calls that strategy from
+    the registry.
 
-1. dense_all_experts
-   Every expert processes every token. Simple reference, but wasteful.
-
-2. dense_masked
-   Only selected experts run. Gathers selected tokens with masks and
-   scatters results back. Skips unused experts but uses Python loops.
-
-3. sort_and_slice
-   Sorts token-expert pairs by expert, then processes contiguous slices.
-   Avoids masking and per-expert gathering. Fastest in practice.
-
-All three are mathematically equivalent and should produce matching
-outputs and gradients. See benchmarks/check_dispatch_equivalence.py.
+Strategy choice is a config knob (MOEConfig.dispatch), so any registered
+dispatch strategy in dispatch.DISPATCH_REGISTRY can be selected without
+touching this file. Default is "sort_pad_bucket".
 """
 
+from dataclasses import dataclass, field
 
 import torch
+import torch.nn as nn
 
+from src.models.moe.dispatch import DEFAULT_BUCKET, DISPATCH_REGISTRY
 from src.models.moe.experts import ModuleListExperts, StackedExperts
-from src.models.moe.router import RoutingResult
+from src.models.moe.router import GatingNetwork, RoutingResult, route
+
+# Dispatch strategies that need the batched-matmul (StackedExperts) layout.
+# Everything else uses the python-loop (ModuleListExperts) layout.
+_STACKED_EXPERT_STRATEGIES = {"dense_masked", "sort_and_pad", "sort_pad_bucket"}
 
 
-def dense_all_experts(
-    x: torch.Tensor,
-    routing: RoutingResult,
-    experts: ModuleListExperts,
-    top_k: int,
-) -> torch.Tensor:
-    """Naive reference dispatch: every expert sees every token.
+@dataclass
+class MOEConfig:
+    n_embd: int
+    n_experts: int
+    top_k: int
+    dispatch: str = "sort_pad_bucket"
+    alpha_moe: float = 0.01
+    hidden_dim: int | None = None  # defaults to 4 * n_embd, see __post_init__
+    capacity_factor: float = 1.25  # used by sort_and_pad
+    bucket: list = field(default_factory=lambda: list(DEFAULT_BUCKET))  # used by sort_pad_bucket
+    swiglu: bool = True
 
-    O(num_experts) full-width matmuls regardless of how sparse the actual
-    routing is. Never use this for anything beyond a correctness check or
-    a small toy demo -- it defeats the entire point of MoE sparsity.
+    def __post_init__(self) -> None:
+        if self.hidden_dim is None:
+            self.hidden_dim = 4 * self.n_embd
+
+
+class MOE(nn.Module):
+    """MoE feed-forward sublayer. Router -> dispatch(config.dispatch) -> output.
+
+    Builds both expert container layouts (ModuleListExperts, StackedExperts)
+    sharing the same underlying weights are NOT tied between the two --
+    each strategy needs its own container because the tensor layouts differ
+    (list of nn.Linear vs. one stacked 3D parameter). Whichever container the
+    selected strategy needs is the one actually used in forward(); the other
+    sits unused unless you switch config.dispatch at runtime.
     """
-    T, C = x.shape     # T -> total number of tokens and C--> embedding/hidden dim 
 
-    num_experts = len(experts)
+    def __init__(self, config: MOEConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.top_k = config.top_k
 
-    expert_out_list = [expert(x).unsqueeze(1) for expert in experts.experts]  # each (T, 1, C)
-    expert_output = torch.cat(expert_out_list, dim=1)  # (T, num_experts, C)
+        if config.dispatch not in DISPATCH_REGISTRY:
+            raise ValueError(
+                f"Unknown dispatch strategy {config.dispatch!r}. "
+                f"Available: {sorted(DISPATCH_REGISTRY.keys())}"
+            )
+        self.dispatch_fn = DISPATCH_REGISTRY[config.dispatch]
+        self._uses_stacked = config.dispatch in _STACKED_EXPERT_STRATEGIES
 
-    weight_full = torch.zeros(T, num_experts, device=x.device, dtype=x.dtype)
-    # placing the routing values at the position specified by the index for expert 
-    weight_full.scatter_(1, routing.indices, routing.values)  # (T, num_experts) 
+        self.gate = GatingNetwork(config.n_embd, config.n_experts)
 
-    
-    out = torch.einsum("te,tec->tc", weight_full, expert_output)
-    return out
+        if self._uses_stacked:
+            self.experts = StackedExperts(
+                config.n_embd,
+                config.hidden_dim,
+                config.n_embd,
+                config.n_experts,
+                swiglu=config.swiglu,
+            )
+        else:
+            self.experts = ModuleListExperts(
+                config.n_embd,
+                config.hidden_dim,
+                config.n_embd,
+                config.n_experts,
+                swiglu=config.swiglu,
+            )
 
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, RoutingResult]:
+        """x: (B, T, C). Flattened to (T, C) for routing/dispatch (dispatch's
+        concern per router.py's docstring), reshaped back before return.
+        """
+        B, T, C = x.shape
+        x_flat = x.reshape(B * T, C)
 
-def dense_masked(
-    x: torch.Tensor,
-    routing: RoutingResult,
-    experts: StackedExperts,
-    top_k: int,
-) -> torch.Tensor:
-    """dispatch: one-hot mask, loop only over hit experts.
+        routing = route(x_flat, self.gate, self.top_k)
 
-    Builds a (num_experts, top_k, T) mask, finds which experts were
-    selected by at least one token, and for each such expert gathers its
-    tokens, computes, and scatters the weighted result back via
-    index_add_. Skips experts with zero tokens but still does an explicit
-    gather/scatter per hit expert.
-    """
-    T, C = x.shape
-    num_experts = experts.num_experts
-    final_output = torch.zeros(T, C, device=x.device, dtype=x.dtype)
+        kwargs = {}
+        if self.config.dispatch == "sort_and_pad":
+            kwargs["capacity_factor"] = self.config.capacity_factor
+        elif self.config.dispatch == "sort_pad_bucket":
+            kwargs["BUCKET"] = self.config.bucket
 
-    with torch.no_grad():
-        expert_mask = torch.nn.functional.one_hot(routing.indices, num_classes=num_experts)
-        expert_mask = expert_mask.permute(2, 1, 0)  # (num_experts, top_k, T)
-        expert_used = expert_mask.sum(dim=(-1, -2)).nonzero()
-
-    for expert_idx_tensor in expert_used:
-        expert_idx = expert_idx_tensor[0].item()
-        top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-        current_state = x[token_idx]
-        current_hidden = experts.forward_one_expert(current_state, expert_idx)
-        current_hidden = current_hidden * routing.values[token_idx, top_k_pos, None]
-        final_output.index_add_(0, token_idx, current_hidden.to(final_output.dtype))
-
-    return final_output
-
-
-def sort_and_slice(
-    x: torch.Tensor,
-    routing: RoutingResult,
-    experts: ModuleListExperts,
-    top_k: int,
-) -> torch.Tensor:
-    """Aimed to be Fastest dispatch: global sort by expert id, contiguous per-expert slices.
-
-    Every (token, chosen-expert) pair is flattened into one list, sorted by
-    expert id so all of expert i's tokens land in one contiguous block, and
-    bincount gives the exact slice boundaries with no further masking. Each
-    expert's forward call operates on a tightly packed (count_i, C) tensor
-     no wasted computation on tokens the expert doesn't own, no gather
-    via boolean indexing (argsort + contiguous slicing is cheaper than
-    torch.where-based gathering).
-
-    This is the dispatch paired with the global-LBL MoE variant, since that
-    variant is meant to be the fastest end-to-end configuration.
-    """
-    T, C = x.shape
-    num_experts = len(experts)
-
-    flattened_indices = torch.flatten(routing.indices)
-    flattened_values = torch.flatten(routing.values)
-    token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
-
-    exp_order = torch.argsort(flattened_indices)
-    sorted_experts = flattened_indices[exp_order]
-    sorted_token_ids = token_ids[exp_order]
-    sorted_values = flattened_values[exp_order]
-
-    counts = torch.bincount(sorted_experts, minlength=num_experts)
-
-    final_output = torch.zeros(T, C, device=x.device, dtype=x.dtype)
-    start = 0
-    for expert_id in range(num_experts):
-        count = counts[expert_id].item()
-        if count == 0:
-            continue
-        end = start + count
-        tok_ids = sorted_token_ids[start:end]
-        weights = sorted_values[start:end]
-        expert_out = experts[expert_id](x[tok_ids])
-        final_output[tok_ids] += expert_out * weights.unsqueeze(-1)
-        start = end
-
-    return final_output
+        out_flat = self.dispatch_fn(x_flat, routing, self.experts, self.top_k, **kwargs)
+        out = out_flat.reshape(B, T, C)
+        return out, routing
 
 
-DISPATCH_REGISTRY = {
-    "dense_all_experts": dense_all_experts,
-    "dense_masked": dense_masked,
-    "sort_and_slice": sort_and_slice,
-}
+# Backwards-compat alias: some earlier code/notes refer to this class in
+# lowercase. Keep both names pointing at the same class so nothing importing
+# either spelling breaks.
+MoE = MOE

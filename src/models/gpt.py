@@ -2,7 +2,7 @@
 GPT: decoder-only transformer, MoE feed-forward sublayer.
 
 This file only wires components together (embeddings, attention blocks,
-MOE, LM head) -- it does not implement attention or MoE internals itself.
+MOE, LM head) it does not implement attention or MoE internals itself.
 See src/models/attention/ and src/models/moe/ for those.
 """
 
@@ -25,8 +25,10 @@ class GPTConfig:
     n_embd: int = 384
     n_experts: int = 8
     top_k: int = 2
-    dispatch: str = "sort_and_slice"
+    dispatch: str = "sort_pad_bucket"  # any name in DISPATCH_REGISTRY works
     alpha_moe: float = 0.01
+    capacity_factor: float = 1.25  # only used by dispatch="sort_and_pad"
+    bucket: list | None = None  # only used by dispatch="sort_pad_bucket"; None -> MOEConfig default
 
 
 class Block(nn.Module):
@@ -35,14 +37,17 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MOE(
-            MOEConfig(
-                n_embd=config.n_embd,
-                n_experts=config.n_experts,
-                top_k=config.top_k,
-                dispatch=config.dispatch,
-            )
+        moe_kwargs = dict(
+            n_embd=config.n_embd,
+            n_experts=config.n_experts,
+            top_k=config.top_k,
+            dispatch=config.dispatch,
+            alpha_moe=config.alpha_moe,
+            capacity_factor=config.capacity_factor,
         )
+        if config.bucket is not None:
+            moe_kwargs["bucket"] = config.bucket
+        self.mlp = MOE(MOEConfig(**moe_kwargs))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, RoutingResult]:
         x = x + self.attn(self.ln_1(x))
