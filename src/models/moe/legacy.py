@@ -64,7 +64,7 @@ class ShazeerMOE(nn.Module):
             self.track_experts.append(indices.detach())
 
         full_H = torch.full_like(H_x, float("-inf"))
-        full_H.scatter_(-1, indices, H_x.gather(-1, indices))
+        full_H.scatter_(-1, indices,values)  # fixed: unnessacary compute
         G_x = F.softmax(full_H, dim=-1)
 
         importance = G_x.sum(dim=1)
@@ -88,7 +88,31 @@ class ShazeerMOE(nn.Module):
 
         return out, importance, Load
 
+# Implmented a global no-approximation version of load balance instead 
+"""
+Before reading any paper about load-balancing techniques, I came up with my own approach to try to match the way papers define load balancing.
 
+In the papers I had read, nothing was specifically defined for the case where gradient accumulation is used.
+So, I thought the batch size should still be treated as the whole batch. Instead of doing loss.backward() on each micro-batch, we should therefore do it on the whole batch.
+
+My tries:
+
+1. Retaining the graph:
+    I first tried retaining the computation graph across all gradient accumulation steps. However, this caused a major memory problem,
+    as the entire autograd graph had to remain alive on the GPU until the final accumulation step.
+    This made the approach very inefficient in practice.
+2. Two-pass technique:
+    I then tried to solve the memory bottleneck with a more practical approach.
+    I implemented a two-pass technique where the first pass creates the computation graph exclusively for the load-balancing loss across the accumulated micro-batches, 
+    without including the language-model loss. The second pass then connects this load-balancing loss to the ongoing loss through the chain rule.
+    One important requirement is that both passes must use the same seed before starting, so that the routing results and everything dependent on them remain identical.
+    Problem with this: This is also very inefficient, since performing two complete forward passes over the whole model is extremely expensive.
+
+Edit: I found a paper that relates directly to this problem. It states that performing loss.backward() at every gradient accumulation step can degrade model performance, and proposes an approximate global load-balancing algorithm.
+
+Paper: Demons in the Detail: On Implementing Load Balancing Loss for Training Specialized Mixture-of-Expert Models
+https://arxiv.org/abs/2501.11873
+"""
 def run_two_pass_step(
     model,
     train_loader,
