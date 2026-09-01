@@ -115,7 +115,11 @@ Paper: [arxiv.org/abs/2202.08906](https://arxiv.org/abs/2202.08906)
 **Then the global load-balancing loss** —The standard LBL is computed per-microbatch, which is a weaker signal than computing it over the full global batch. This paper walks through implementing the global version properly: accumulating stats across microbatches, keeping only the graph you need, and manually wiring the gradient back through each microstep. This directly shaped the current `losses.py`/`router.py` split in this repo.
 Paper: [aclanthology.org/2025.acl-long.249](https://aclanthology.org/2025.acl-long.249/)
 
-**Currently: Qwen-style / global-LBL direction** — current MoE work follows this global-batch direction, cross-checked against the Qwen3 report's MoE design.
+**Then Qwen-style / global-LBL direction** — current MoE work follows this global-batch direction, cross-checked against the Qwen3 report's MoE design.
 Paper: [arxiv.org/abs/2505.09388](https://arxiv.org/abs/2505.09388)
+
+**(Recent)Deepseekmoe-style segmentation and shared expert pool** Most recent Architectural change Is addition of segmentation of experts + shared_expert pool which is inspired from Global-Lbl direction which gives more isolated expert utilisation , this paper aims exactly to that, by tweaking the archietecure. Sot it keeps the Total_params same as well as compute size , but fine-graining the experts into smaller ones, which leads to help **Knowledge hybridity** increase in num_experts, gives them more specialised knowledge. It also states one more problem **Knowledge-Redundancy** which means every expert learn the same common knowledge which kindof waste their capacity, to fight exaclty that it introduces **Shared_experts** which excluded from routing and every token get routed to these as a hard constraint. 
+Paper: [https://arxiv.org/abs/2401.06066](https://arxiv.org/abs/2401.06066)
+
 
 Also referenced along the way: **Mixtral** (arxiv.org/abs/2401.04088, the `dense_masked` dispatch strategy mirrors Mixtral's `MixtralExperts`), **Attention Is All You Need** (arxiv.org/abs/1706.03762), **FlashAttention / FlashAttention-2** (arxiv.org/abs/2205.14135, arxiv.org/abs/2307.08691), **GPT-2** (cdn.openai.com/better-language-models/language-models.pdf), **GPT-3** (arxiv.org/abs/2005.14165), **Adam** (arxiv.org/abs/1412.6980), **AdamW** (arxiv.org/abs/1711.05101).
