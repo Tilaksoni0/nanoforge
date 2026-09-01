@@ -123,8 +123,8 @@ class StackedExperts(nn.Module):
         equivalent.
         """
         if self.swiglu:
-            gate, up = torch.bmm(x, self.gate_up_proj.transpose(1, 2)).chunk(2, dim=-1)
+            gate, up = (x @ self.gate_up_proj.transpose(1, 2)).chunk(2, dim=-1) #fixed bmm has no real use so instead using it, using gemm@ 
             hidden = self.gelu(gate) * up
         else:
-            hidden = self.gelu(torch.bmm(x, self.gate_up_proj.transpose(1, 2)))
-        return torch.bmm(hidden, self.down_proj.transpose(1, 2))
+            hidden = self.gelu((x@self.gate_up_proj.transpose(1, 2)))
+        return (hidden @ self.down_proj.transpose(1, 2))
