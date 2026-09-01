@@ -21,13 +21,13 @@ class GatingNetwork(nn.Module):
 class RoutingResult:
     """Output of a full routing pass for one layer, one forward call.
 
-    logits:  (T, num_experts) raw gate logits, graph-attached
+    gate_logits:  (T, num_experts) raw gate logits, graph-attached
     probs:   (T, num_experts) softmax over all experts, graph-attached
     values:  (T, top_k) softmax probability of each chosen expert, graph-attached
     indices: (T, top_k) chosen expert ids, no grad (indices are not differentiable)
     """
 
-    logits: torch.Tensor
+    gate_logits: torch.Tensor
     probs: torch.Tensor
     values: torch.Tensor
     indices: torch.Tensor
@@ -44,14 +44,14 @@ def route(
     token axis is dispatch's concern (different dispatch strategies want
     different shapes), not the router's.
     """
-    logits = gate(x)
-    probs = torch.softmax(logits, dim=-1)
+    gate_logits = gate(x)
+    probs = torch.softmax(gate_logits, dim=-1)
     values, indices = torch.topk(probs, top_k, dim=-1)
-    return RoutingResult(logits=logits, probs=probs, values=values, indices=indices)
+    return RoutingResult(gate_logits=gate_logits, probs=probs, values=values, indices=indices)
 
 
 def extract_stats(
-    routing_results: tuple[RoutingResult, ...],
+    routing_results: tuple[RoutingResult, ...], # keeping this tuple so no mutation can be done 
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Stack per-layer RoutingResult into frequency/probability tensors.
@@ -85,9 +85,14 @@ def extract_stats(
 
         counts = torch.bincount(flattened_indices, minlength=num_experts)
         freq_all_layer[layer_id, :] = counts
+        probs_all_layer[layer_id , : ] = result.probs.view(-1 , num_experts).sum(0) #  (T_total , N) becomes (N) 
 
-        layer_probs = torch.zeros(num_experts, device=device, dtype=result.values.dtype)
-        layer_probs.scatter_add_(0, flattened_indices, flattened_values)
-        probs_all_layer[layer_id, :] = layer_probs
-
+        # this previous implementation i found incorrect 
+        # layer_probs = torch.zeros(num_experts, device=device, dtype=result.values.dtype)
+        # layer_probs.scatter_add_(0, flattened_indices, flattened_values)
+        # probs_all_layer[layer_id, :] = layer_probs 
+    # could have sent mean probs directly but now doing this here cuz i think probs_mean should still have
+    # total batch_count instead of tok_count per micro batch   
+    # i will handle this in global load balancing 
     return freq_all_layer, probs_all_layer
+    
