@@ -118,9 +118,14 @@ Paper: [aclanthology.org/2025.acl-long.249](https://aclanthology.org/2025.acl-lo
 **Then Qwen-style / global-LBL direction** — current MoE work follows this global-batch direction, cross-checked against the Qwen3 report's MoE design.
 Paper: [arxiv.org/abs/2505.09388](https://arxiv.org/abs/2505.09388)
 
-**(Recent) DeepSeekMoE-style segmentation and shared expert pool** — The most recent architectural change is the addition of expert segmentation and a shared expert pool, inspired by the goal of greater expert specialization. This paper aims exactly at that by tweaking the architecture.It keeps the total number of parameters and computational cost roughly the same, while fine-graining the experts into smaller ones. This increases the number of experts and allows them to learn more specialized knowledge, addressing **knowledge hybridity**.
+**DeepSeekMoE-style segmentation and shared expert pool** — The most recent architectural change is the addition of expert segmentation and a shared expert pool, inspired by the goal of greater expert specialization. This paper aims exactly at that by tweaking the architecture.It keeps the total number of parameters and computational cost roughly the same, while fine-graining the experts into smaller ones. This increases the number of experts and allows them to learn more specialized knowledge, addressing **knowledge hybridity**.
 The paper also identifies another problem: **knowledge redundancy**, where every expert tends to learn the same common knowledge, wasting their capacity. To address this, it introduces **Shared Experts**, which are excluded from the routing mechanism. Every token is always routed through these shared experts, ensuring that common knowledge is captured there instead of being redundantly learned by the routed experts.
 
 Paper: 	[arXiv:2401.06066](https://arxiv.org/pdf/2401.06066)
+
+**(Recent)Loss free load Balancing** - As I was doing the math around backpropagation, I realized that standard auxiliary loss isn't only limited to routing weights; it actually adds gradient terms for other unrelated parameters, causing unwanted noise in the gradients those parameters receive. It was intuitive after this to search for a technique that introduces zero noise into our language gradients, leading me to the paper Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts (Wang et al.), which introduced loss-free load balancing. I have implemented this same approach in my MoE files. Still needs verification on whether or not it actually helps improve language modeling loss, Will be testing it and set a benchmark for this.
+
+Paper: 	[arXiv:2408.15664](https://arxiv.org/abs/2408.15664)
+
 
 Also referenced along the way: **Mixtral** (arxiv.org/abs/2401.04088, the `dense_masked` dispatch strategy mirrors Mixtral's `MixtralExperts`), **Attention Is All You Need** (arxiv.org/abs/1706.03762), **FlashAttention / FlashAttention-2** (arxiv.org/abs/2205.14135, arxiv.org/abs/2307.08691), **GPT-2** (cdn.openai.com/better-language-models/language-models.pdf), **GPT-3** (arxiv.org/abs/2005.14165), **Adam** (arxiv.org/abs/1412.6980), **AdamW** (arxiv.org/abs/1711.05101).
