@@ -45,10 +45,10 @@ class Expert(nn.Module):
 class ModuleListExperts(nn.Module):
     """A list of independent Expert modules, indexed by expert id."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_experts: int) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_experts: int,swiglu: bool = True) -> None:
         super().__init__()
         self.experts = nn.ModuleList(
-            [Expert(input_dim, hidden_dim, output_dim) for _ in range(num_experts)]
+            [Expert(input_dim, hidden_dim, output_dim,swiglu ) for _ in range(num_experts)]
         )
         self.num_experts = num_experts
 
