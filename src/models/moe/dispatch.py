@@ -160,7 +160,7 @@ def sort_and_pad(
     flattened_values = torch.flatten(routing.values)
     token_ids = torch.arange(T, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
 
-    exp_order = torch.argsort(flattened_indices)
+    exp_order = torch.argsort(flattened_indices, stable = True) # edit: stable = True , making it future token leakage proof. 
     sorted_experts = flattened_indices[exp_order]
     sorted_token_ids = token_ids[exp_order]
     sorted_values = flattened_values[exp_order]
