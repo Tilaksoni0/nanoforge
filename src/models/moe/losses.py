@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.distributed as dist
 
 
+
 class GlobalLoadBalancingLoss(nn.Module):
     """Accumulates expert-selection frequency across microsteps and
     computes the global-batch LBL (Qiu et al. 2025).
@@ -102,7 +103,7 @@ class GlobalLoadBalancingLoss(nn.Module):
         return self.alpha * self.num_experts * (frequency * probability_mean).sum()
 
     @torch.no_grad()
-    def reset(self) -> None:
+    def reset_freq(self) -> None:
         self.freq_buffer.zero_()
 
 
@@ -125,3 +126,32 @@ def load_balancing_loss(
         raise RuntimeError("frequency must contain at least one selection")
     frequency = frequency / totals
     return alpha * num_experts * (frequency * probability_mean).sum()
+
+class Loss_free_balancing(nn.Module): 
+    def __init__(self, num_layers , num_experts,update_rate, dist_group,device): 
+        super().__init__()
+        self.num_experts = num_experts
+        self.num_layers = num_layers
+        self.update_rate = update_rate
+        self.dist_group = dist_group
+        self.register_buffer(
+                    "expert_biases",
+                    torch.zeros(num_layers, num_experts, device=device, dtype=torch.float32),
+                    persistent=False,
+                ) 
+    @torch.no_grad
+    def update_bias(self, freq_all_layer: torch.Tensor ): 
+        counts = freq_all_layer
+
+        if self.dist_group is not None and dist.is_initialized():
+                    counts = counts.clone()
+                    dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=self.dist_group)
+
+        error_per_exp = torch.mean(counts) - counts
+        bi_local = self.update_rate*torch.sign(error_per_exp)
+        self.expert_biases.add_(bi_local) 
+
+    @torch.no_grad()
+    def reset_bias(self) -> None:
+        self.expert_biases.zero_()
+        

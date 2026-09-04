@@ -37,6 +37,11 @@ def route(
     x: torch.Tensor,
     gate: GatingNetwork,
     top_k: int,
+    use_lossFreeBalancing: bool,
+    expert_biases: torch.tensor
+  
+    
+    
 ) -> RoutingResult:
     """Run the gate and select top_k experts per token.
 
@@ -45,8 +50,14 @@ def route(
     different shapes), not the router's.
     """
     gate_logits = gate(x)
-    probs = torch.softmax(gate_logits, dim=-1)
-    values, indices = torch.topk(probs, top_k, dim=-1)
+    if not use_lossFreeBalancing: 
+        probs = torch.softmax(gate_logits, dim=-1)
+        values, indices = torch.topk(probs, top_k, dim=-1)
+    else: 
+        gate_logits= torch.sigmoid(gate_logits)
+        biased_logits = gate_logits + expert_biases 
+        _ , indices = torch.topk(biased_logits, k = top_k, dim = -1)
+        values= gate_logits.gather( -1 , indices)
     return RoutingResult(gate_logits=gate_logits, probs=probs, values=values, indices=indices)
 
 

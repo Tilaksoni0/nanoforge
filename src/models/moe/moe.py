@@ -50,6 +50,7 @@ class MOEConfig:
     bucket: list = field(default_factory=lambda: list(DEFAULT_BUCKET))  # used by sort_pad_bucket
     swiglu: bool = True
     use_segmentation: bool = True 
+    use_lossFreeBalancing : bool = False
 
     def __post_init__(self) -> None:
         if self.hidden_dim is None:
@@ -73,6 +74,11 @@ class MOE(nn.Module):
         self.use_segmentation = config.use_segmentation
         self.granularity_factor = config.granularity_factor
         self.num_shared_expert = config.num_shared_expert
+        self.use_lossFreeBalancing = config.use_lossFreeBalancing
+
+        
+
+  
 
         self.top_k = (config.top_k -config.num_shared_expert) if config.use_segmentation  else config.top_k #
 
@@ -120,14 +126,20 @@ class MOE(nn.Module):
                 swiglu=config.swiglu,
             )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, RoutingResult]:
+    def forward(self, x: torch.Tensor, expert_biases = None) -> tuple[torch.Tensor, RoutingResult]:
         """x: (B, T, C). Flattened to (T, C) for routing/dispatch (dispatch's
         concern per router.py's docstring), reshaped back before return.
         """
         B, T, C = x.shape
         x_flat = x.reshape(B * T, C)
+        if self.use_lossFreeBalancing: 
+            if expert_biases is None : 
+                raise ValueError(
+                                f"!lossFreeBalancing is {self.use_lossFreeBalancing!r}. "
+                                f"lossFreeBalancing requires expert biases, cannot be None"
+                            )
 
-        routing = route(x_flat, self.gate, self.top_k)
+        routing = route(x_flat,  self.gate,self.top_k, self.use_lossFreeBalancing ,expert_biases)
 
         kwargs = {}
         if self.config.dispatch == "sort_and_pad":
