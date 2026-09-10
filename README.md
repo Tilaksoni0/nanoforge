@@ -72,12 +72,16 @@ NanoForge/
 │   │   ├── norms/
 │   │   └── gpt.py          # wires attention + MoE into a full GPT
 │   ├── training/           # train.py, optimizer, lr schedule
-│   ├── data/                # tinyshakespeare dataloader
+│   ├── data/
+|   |    ├── data_driver.py     # handles multiple data downloading on request and tokenising 
+|   |    ├── data_dispatch.py   # works as dataloader for training batches currently in developing stage
+|   |    ├──shakespeare.py      #toy shakespere datset for testing trivial things          
 │   ├── config/
 │   ├── kernels/             # Triton kernel work (active)
 │   ├── evaluation/           # model-quality eval, not yet built (needs a trained checkpoint first)
 │   ├── experiments/
 │   └── distributed/
+|   └── shared.py           # all common things for every files
 ├── benchmarks/
 │   ├── benchmark_dispatch.py
 │   ├── check_dispatch_equivalence.py
@@ -129,3 +133,9 @@ Paper: 	[arXiv:2408.15664](https://arxiv.org/abs/2408.15664)
 
 
 Also referenced along the way: **Mixtral** (arxiv.org/abs/2401.04088, the `dense_masked` dispatch strategy mirrors Mixtral's `MixtralExperts`), **Attention Is All You Need** (arxiv.org/abs/1706.03762), **FlashAttention / FlashAttention-2** (arxiv.org/abs/2205.14135, arxiv.org/abs/2307.08691), **GPT-2** (cdn.openai.com/better-language-models/language-models.pdf), **GPT-3** (arxiv.org/abs/2005.14165), **Adam** (arxiv.org/abs/1412.6980), **AdamW** (arxiv.org/abs/1711.05101).
+
+
+
+**current_update**
+
+**Dataset-Driver** - Dataset driver is written to experiment with domain-based specialization of experts in Mixture-of-Experts models and other mechanistic experiments to do on a multi-domain dataset and also to find a mixing strategy. This lets users decide datasets/domains which they want to have for training purposes with the liberty of downloading only the required chunk of data which they need on the token budget. This also handles the tokenization part. I used a pre-tokenization strategy for this where I will download and tokenize the dataset according to a given token_budget and let them download multiple domains, whereas the mixing can be handled outside it either at the time of dispatch of tokens in the training loop or making of token-batches prior to training. Currently, there is a fixed pool of datasets I have decided, but will develop it so one can come with their own dataset repo ID and info handling multiple extensions.
